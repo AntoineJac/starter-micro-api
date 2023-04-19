@@ -1,75 +1,79 @@
-// Import of net module
-const net = require("net");
-const server = net.createServer();
+var net = require('net');
+var http = require('http');
+var url = require('url');
 
-server.on("connection", (clientToProxySocket) => {
-    console.log("Client connected to proxy");
-    clientToProxySocket.once("data", (data) => {
-        let isTLSConnection = data.toString().indexOf("CONNECT") !== -1;
+var proxyServer = http.createServer(httpOptions);
 
-        let serverPort = 80;
-        let serverAddress;
-        console.log(data.toString());
-        if (isTLSConnection) {
-            serverPort = 443;
-            serverAddress = data
-                .toString()
-                .split("CONNECT")[1]
-                .split(" ")[1]
-                .split(":")[0];
-        } else {
-            serverAddress = data.toString().split("Host: ")[1].split("\r\n")[0];
-        }
-        console.log(serverAddress);
+// handle http proxy requests
+function httpOptions(clientReq, clientRes) {
+  var reqUrl = url.parse(clientReq.url);
+  console.log('proxy for http request: ' + reqUrl.href);
 
-        // Creating a connection from proxy to destination server
-        let proxyToServerSocket = net.createConnection(
-            {
-                host: serverAddress,
-                port: serverPort,
-            },
-            () => {
-                console.log("Proxy to server set up");
-            }
-        );
+  var options = {
+    hostname: reqUrl.hostname,
+    port: reqUrl.port,
+    path: reqUrl.path,
+    method: clientReq.method,
+    headers: clientReq.headers
+  };
 
+  // create socket connection on behalf of client, then pipe the response to client response (pass it on)
+  var serverConnection = http.request(options, function (res) {
+    clientRes.writeHead(res.statusCode, res.headers)
+    res.pipe(clientRes);
+  });
 
-        if (isTLSConnection) {
-            clientToProxySocket.write("HTTP/1.1 200 OK\r\n\r\n");
-        } else {
-            proxyToServerSocket.write(data);
-        }
+  clientReq.pipe(serverConnection);
 
-        clientToProxySocket.pipe(proxyToServerSocket);
-        proxyToServerSocket.pipe(clientToProxySocket);
+  clientReq.on('error', (e) => {
+    console.log('client socket error: ' + e);
+  });
 
-        proxyToServerSocket.on("error", (err) => {
-            console.log("Proxy to server error");
-            console.log(err);
-        });
+  serverConnection.on('error', (e) => {
+    console.log('server connection error: ' + e);
+  });
+}
 
-        clientToProxySocket.on("error", (err) => {
-            console.log("Client to proxy error");
-            console.log(err)
-        });
+// handle https proxy requests (CONNECT method)
+proxyServer.on('connect', (clientReq, clientSocket, head) => {
+  var reqUrl = url.parse('https://' + clientReq.url);
+  console.log('proxy for https request: ' + reqUrl.href + '(path encrypted by ssl)');
+
+  var options = {
+    port: reqUrl.port,
+    host: reqUrl.hostname
+  };
+
+  // create socket connection for client, then pipe (redirect) it to client socket
+  var serverSocket = net.connect(options, () => {
+    clientSocket.write('HTTP/' + clientReq.httpVersion + ' 200 Connection Established\r\n' +
+                  'Proxy-agent: Node.js-Proxy\r\n' +
+                  '\r\n', 'UTF-8', () => {
+      // creating pipes in both ends
+      serverSocket.write(head);
+      serverSocket.pipe(clientSocket);
+      clientSocket.pipe(serverSocket);
     });
+  });
+
+  clientSocket.on('error', (e) => {
+    console.log("client socket error: " + e);
+    serverSocket.end();
+  });
+
+  serverSocket.on('error', (e) => {
+    console.log("forward proxy server connection error: " + e);
+    clientSocket.end();
+  });
 });
 
-server.on("error", (err) => {
-    console.log("Some internal server error occurred");
-    console.log(err);
+proxyServer.on('clientError', (err, clientSocket) => {
+  console.log('client error: ' + err);
+  clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
 });
 
-server.on("close", () => {
-    console.log("Client disconnected");
-});
+proxyServer.listen(2560);
 
-server.listen(
-    {
-        host: "0.0.0.0",
-        port: 8080,
-    },
-    () => {
-        console.log("Server listening on 0.0.0.0:8080");
-    }
-);
+console.log('forward proxy server started, listening on port 2560');
+
+module.exports = proxyServer;
